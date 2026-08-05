@@ -1,0 +1,102 @@
+# =============================================================================
+# LOCAL TEST HARNESS — validates the processor logic from
+# ../hypervisor-host-config.yaml WITHOUT a real Windows Hyper-V host.
+#
+# Why this is needed: `windowsperfcounters` and `windowseventlogreceiver`
+# only work on Windows (they call the Windows PDH/EventLog APIs directly) —
+# neither can run in a Linux Docker container. This config swaps those two
+# receivers for a plain `otlp` receiver, but keeps the EXACT SAME processors
+# (filter/vm_noise, transform/vm_name, groupbyattrs/vm, resource/vm_tag,
+# transform/vm_hostname, count/migration_failures) copied verbatim from
+# hypervisor-host-config.yaml. Feed it synthetic OTLP data via
+# send_test_data.py and read the `debug` exporter's stdout to confirm the
+# vm.name extraction / migration-failure counting logic behaves correctly —
+# e.g. the "#N" duplicate-suffix strip from known-gaps-remediation.md gap #6.
+#
+# This does NOT need a Splunk account or access token — it's fully offline.
+#
+# Run:
+#   docker run --rm -p 4318:4318 \
+#     -v "$(pwd)/otel-collector/test/test-config.yaml:/etc/otelcol-contrib/config.yaml" \
+#     otel/opentelemetry-collector-contrib:latest
+#   python3 otel-collector/test/send_test_data.py
+# =============================================================================
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+connectors:
+  count/migration_failures:
+    logs:
+      hyperv.vmms.migration_failures:
+        description: "Count of Hyper-V live-migration failure events (Event ID 21026) on the VMMS-Admin channel"
+        conditions:
+          - 'attributes["winlog.event_id"] == 21026'
+
+processors:
+  batch:
+    timeout: 1s
+
+  # --- copied verbatim from ../hypervisor-host-config.yaml ---
+  filter/vm_noise:
+    error_mode: ignore
+    metrics:
+      datapoint:
+        - 'IsMatch(attributes["instance"], "^Default Switch.*")'
+        - 'IsMatch(attributes["instance"], ".*\\.vmgs$")'
+        - 'IsMatch(attributes["instance"], ".*\\.iso.*")'
+
+  transform/vm_name:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["vm.name"], attributes["instance"]) where attributes["instance"] != nil
+          - set(attributes["vm.name"], Split(attributes["instance"], ":")[0]) where attributes["instance"] != nil and IsMatch(attributes["instance"], ".*:.*")
+          - set(attributes["vm.name"], Split(attributes["instance"], "_Network Adapter")[0]) where attributes["instance"] != nil and IsMatch(attributes["instance"], ".*_Network Adapter.*")
+          - set(attributes["vm.name"], Split(attributes["instance"], "Virtual Hard Disks-")[1]) where attributes["instance"] != nil and IsMatch(attributes["instance"], ".*Virtual Hard Disks-.*")
+          - set(attributes["vm.name"], Split(attributes["vm.name"], ".vhdx")[0]) where attributes["vm.name"] != nil and IsMatch(attributes["vm.name"], ".*\\.vhdx$")
+          - set(attributes["vm.name"], Split(attributes["vm.name"], "#")[0]) where attributes["vm.name"] != nil and IsMatch(attributes["vm.name"], ".*#[0-9]+$")
+
+  groupbyattrs/vm:
+    keys:
+      - vm.name
+
+  resource/vm_tag:
+    attributes:
+      - key: host.type
+        value: "hypervisor_managed_vm"
+        action: upsert
+      - key: hypervisor.host.name
+        value: "TEST-HOST-LOCAL"
+        action: upsert
+
+  transform/vm_hostname:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["host.name"], attributes["vm.name"]) where attributes["vm.name"] != nil
+  # --- end verbatim copy ---
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    metrics/vm:
+      receivers: [otlp]
+      processors: [filter/vm_noise, transform/vm_name, groupbyattrs/vm, resource/vm_tag, transform/vm_hostname, batch]
+      exporters: [debug]
+    logs/hyperv_events:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, count/migration_failures]
+    metrics/migration_failures:
+      receivers: [count/migration_failures]
+      processors: [batch]
+      exporters: [debug]

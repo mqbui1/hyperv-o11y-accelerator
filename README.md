@@ -23,6 +23,9 @@ and hardened against gaps found during a real customer POC.
 otel-collector/
   hypervisor-host-config.yaml   Tier 1 — deploy on every Hyper-V host
   guest-vm-config.yaml          Tier 2 — opt-in, curated VM subset only
+  test/                         Local Docker test harness (no Windows host
+                                 or Splunk account needed) — validates
+                                 vm.name extraction + migration-failure logic
 terraform/
   main.tf                       signalfx provider + dashboard group
   variables.tf                  splunk_access_token / splunk_realm
@@ -37,6 +40,13 @@ docs/
                                  mapped to fixes/workarounds in this repo
   deployment-guide.md           Delivery, install, configure, test/verify
 ```
+
+## Local testing (no Windows host required)
+
+`otel-collector/test/` has a Docker-based harness that validates the
+`vm.name` extraction logic and the VMMS migration-failure counter using
+synthetic OTLP data — no Windows machine or Splunk account needed. See
+[otel-collector/test/README.md](otel-collector/test/README.md).
 
 ## Quick start
 
