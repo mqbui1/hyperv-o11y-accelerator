@@ -38,7 +38,10 @@ docs/
   limitations.md                What this accelerator cannot do, and why
   known-gaps-remediation.md     10 specific gaps from a real customer POC,
                                  mapped to fixes/workarounds in this repo
+  architecture-gaps-overview.md Combined architecture + gap-mapping summary
   deployment-guide.md           Delivery, install, configure, test/verify
+  nested-hyperv-azure-test-plan.md  Validating gaps #5/#6 on a real
+                                 (nested) Hyper-V host in Azure
 ```
 
 ## Local testing (no Windows host required)
@@ -70,4 +73,6 @@ This repo was hardened against 10 specific findings from a real customer
 POC (malformed VM names, unconfirmed disk-latency units, missing network
 series, VMMS migration failures, etc.) — see
 [docs/known-gaps-remediation.md](docs/known-gaps-remediation.md) for the
-full list and what's already fixed vs. still open.
+full list and what's already fixed vs. still open, or
+[docs/architecture-gaps-overview.md](docs/architecture-gaps-overview.md)
+for a combined architecture + gap-mapping summary.
