@@ -1,0 +1,100 @@
+# =============================================================================
+# Splunk OTel Collector config — Tier 2: Hyper-V GUEST (inside each VM)
+#
+# ** OPT-IN, CURATED SUBSET ONLY — DO NOT ROLL OUT FLEET-WIDE **
+# Every VM running this collector becomes a separately-billed host. At scale
+# this inverts the economics of host-based virtualization licensing: e.g. one
+# real customer POC measured ~1,478 physical/hypervisor hosts vs. ~17,000 VMs
+# — deploying Tier 2 everywhere would multiply the billable host count ~12x
+# for metrics that, for most VMs, Tier 1 (hypervisor-host-config.yaml) already
+# approximates well enough (CPU/memory/network/virtual-disk I/O as seen from
+# the host). See docs/known-gaps-remediation.md, gap #4.
+#
+# Reserve Tier 2 for VMs where host-side visibility is provably insufficient:
+#   - Business-critical workloads that justify the extra host-license cost
+#   - Static-memory VMs (Tier 1's "Current Pressure" counter only exists for
+#     Dynamic Memory VMs — see gap #2), where memory pressure is otherwise
+#     invisible
+#   - VMs where you specifically need real guest filesystem used % (not disk
+#     file size on the host) or in-guest process/app metrics
+#
+# Deploy via whatever config management the customer already uses (SCCM,
+# Group Policy startup script, Ansible, etc.) — scoped to the curated VM list
+# above, not the full fleet.
+#
+# REQUIRED for Tier 1 <-> Tier 2 correlation in Splunk Observability Cloud:
+#   1. The guest OS hostname must match the Hyper-V VM name exactly (the name
+#      shown in Hyper-V Manager / Get-VM). If they differ, override
+#      `host.name` below to the Hyper-V VM name instead of relying on
+#      auto-detection.
+#   2. HYPERV_HOST_NAME env var must be set at deploy time to the hostname of
+#      the parent Hyper-V host, so hypervisor.host.name matches Tier 1's tag
+#      and the infra navigator can link VM -> parent host both ways.
+# =============================================================================
+
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      filesystem:
+      network:
+      paging:
+      processes:
+
+  # Optional (Windows guests only): capture the same "% Free Space" style
+  # counters the Splunk Add-on for Microsoft Hyper-V used to report via its
+  # PowerShell disk input (microsoft:hyperv:vm:disk), for teams that want
+  # metric-name parity with the old TA. hostmetrics/filesystem above already
+  # covers this on Linux and Windows guests equally, so this is optional.
+  windowsperfcounters/guest_disk:
+    collection_interval: 30s
+    metrics:
+      guest.disk.free_space:
+        description: "Free space on guest logical disk (e.g. C:)"
+        unit: "%"
+        gauge: {}
+      guest.disk.free_mb:
+        description: "Free megabytes on guest logical disk"
+        unit: "MBy"
+        gauge: {}
+    perfcounters:
+      - object: "LogicalDisk"
+        instances: ["*"]
+        counters:
+          - { name: "% Free Space", metric: guest.disk.free_space }
+          - { name: "Free Megabytes", metric: guest.disk.free_mb }
+
+processors:
+  batch:
+    timeout: 10s
+
+  resourcedetection/guest:
+    detectors: [env, system]
+    system:
+      hostname_sources: ["os"]
+    override: false
+
+  resource/guest_tag:
+    attributes:
+      - key: host.type
+        value: "hypervisor_managed_vm"
+        action: upsert
+      - key: hypervisor.host.name
+        value: "${env:HYPERV_HOST_NAME}"
+        action: upsert
+
+exporters:
+  otlphttp/splunk:
+    endpoint: "https://ingest.${env:SPLUNK_REALM}.signalfx.com"
+    headers:
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
+
+service:
+  pipelines:
+    metrics:
+      receivers: [hostmetrics, windowsperfcounters/guest_disk]
+      processors: [resourcedetection/guest, resource/guest_tag, batch]
+      exporters: [otlphttp/splunk]

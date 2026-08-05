@@ -1,0 +1,358 @@
+# =============================================================================
+# Splunk OTel Collector config — Tier 1: Hyper-V HOST (hypervisor)
+# Deploy on every Hyper-V host. Install: Splunk Distribution of the
+# OpenTelemetry Collector for Windows.
+# https://docs.splunk.com/observability/en/gdi/opentelemetry/collector-windows/collector-windows-manual.html
+#
+# What this collects (host-side / hypervisor-visible only — see docs/limitations.md
+# for what it CANNOT see, i.e. guest-OS-internal metrics):
+#   metrics/host       -> standard Windows host telemetry (CPU/mem/disk/net)
+#   metrics/hypervisor -> aggregate hypervisor health (Hyper-V Hypervisor,
+#                          Virtual Switch, Dynamic Memory Balancer, VM Health Summary)
+#   metrics/vm         -> per-VM resource-allocation view as seen FROM THE HOST
+#                          (vCPU %, assigned/pressure memory, vNIC throughput,
+#                          virtual disk file I/O) for ALL VMs on this host in a
+#                          single receiver — no per-VM config needed.
+#   logs/hyperv_events -> Hyper-V Windows Event Log channels
+#
+# Resource attribute strategy (read docs/architecture.md before changing):
+#   host.name              = this hypervisor's own hostname (host/hypervisor pipelines)
+#   host.name              = <derived VM name> (vm pipeline, after groupbyattrs)
+#   host.type              = "hypervisor" | "hypervisor_managed_vm"
+#   hypervisor.host.name   = this hypervisor's hostname, stamped onto VM metrics
+#                            too, so Tier 1 (this file) and Tier 2
+#                            (guest-vm-config.yaml) can both be correlated to the
+#                            same host.name in Splunk Observability Cloud IF the
+#                            Hyper-V VM name matches the guest OS hostname.
+# =============================================================================
+
+receivers:
+  # ---------------------------------------------------------------------------
+  # Standard Windows host telemetry (same as any Windows host, not Hyper-V specific)
+  # ---------------------------------------------------------------------------
+  windowsperfcounters/host:
+    collection_interval: 30s
+    metrics:
+      host.cpu.processor_time:
+        description: "Processor time executing non-idle threads"
+        unit: "%"
+        gauge: {}
+      host.memory.available:
+        description: "Physical memory available for allocation"
+        unit: "MBy"
+        gauge: {}
+      host.memory.committed_pct:
+        description: "Ratio of committed bytes to commit limit"
+        unit: "%"
+        gauge: {}
+      host.disk.free_space:
+        description: "Free space on logical disk"
+        unit: "%"
+        gauge: {}
+      host.net.bytes_total:
+        description: "Total network bytes per second"
+        unit: "By/s"
+        gauge: {}
+    perfcounters:
+      - object: "Processor Information"
+        instances: ["_Total"]
+        counters:
+          - { name: "% Processor Time", metric: host.cpu.processor_time }
+      - object: "Memory"
+        counters:
+          - { name: "Available MBytes", metric: host.memory.available }
+          - { name: "% Committed Bytes In Use", metric: host.memory.committed_pct }
+      - object: "LogicalDisk"
+        instances: ["*"]
+        counters:
+          - { name: "% Free Space", metric: host.disk.free_space }
+      - object: "Network Interface"
+        instances: ["*"]
+        counters:
+          - { name: "Bytes Total/sec", metric: host.net.bytes_total }
+
+  # ---------------------------------------------------------------------------
+  # Hypervisor-wide health (one value per host, not per VM)
+  # ---------------------------------------------------------------------------
+  windowsperfcounters/hypervisor:
+    collection_interval: 30s
+    metrics:
+      hyperv.health.ok:
+        description: "VMs in healthy state"
+        unit: "{vms}"
+        gauge: {}
+      hyperv.health.critical:
+        description: "VMs in critical state"
+        unit: "{vms}"
+        gauge: {}
+      hyperv.logical_processors:
+        description: "Logical processors in hypervisor"
+        unit: "{cpus}"
+        gauge: {}
+      hyperv.virtual_processors:
+        description: "Virtual processors across all partitions"
+        unit: "{cpus}"
+        gauge: {}
+      hyperv.host_cpu.total_run_time:
+        description: "Host logical processor total run time"
+        unit: "%"
+        gauge: {}
+      hyperv.memory.current_pressure:
+        description: "Current system-wide VM memory pressure"
+        unit: "%"
+        gauge: {}
+      hyperv.vswitch.bytes_total:
+        description: "Virtual switch total bytes per second (all switches)"
+        unit: "By/s"
+        gauge: {}
+    perfcounters:
+      - object: "Hyper-V Virtual Machine Health Summary"
+        counters:
+          - { name: "Health Ok", metric: hyperv.health.ok }
+          - { name: "Health Critical", metric: hyperv.health.critical }
+      - object: "Hyper-V Hypervisor"
+        counters:
+          - { name: "Logical Processors", metric: hyperv.logical_processors }
+          - { name: "Virtual Processors", metric: hyperv.virtual_processors }
+      - object: "Hyper-V Hypervisor Logical Processor"
+        instances: ["_Total"]
+        counters:
+          - { name: "% Total Run Time", metric: hyperv.host_cpu.total_run_time }
+      - object: "Hyper-V Dynamic Memory Balancer"
+        instances: ["System Balancer"]
+        counters:
+          - { name: "System Current Pressure", metric: hyperv.memory.current_pressure }
+      - object: "Hyper-V Virtual Switch"
+        instances: ["*"]
+        counters:
+          - { name: "Bytes Total/sec", metric: hyperv.vswitch.bytes_total }
+
+  # ---------------------------------------------------------------------------
+  # Per-VM resource-allocation view, as seen from the host. A single receiver
+  # instance handles ALL VMs via wildcard instances — no per-VM config, and no
+  # need to deploy anything inside the guest for this tier.
+  # LIMITATION: these are host-side counters only (assigned CPU %, memory
+  # balance, vNIC throughput, virtual disk FILE I/O). They cannot see inside
+  # the guest OS (no real filesystem free space, no processes, no app
+  # metrics) — that requires Tier 2 (guest-vm-config.yaml). See
+  # docs/limitations.md.
+  # ---------------------------------------------------------------------------
+  windowsperfcounters/vm:
+    collection_interval: 30s
+    metrics:
+      vm.cpu.total_run_time:
+        description: "vCPU total run time"
+        unit: "%"
+        gauge: {}
+      vm.cpu.guest_run_time:
+        description: "vCPU guest code run time"
+        unit: "%"
+        gauge: {}
+      vm.memory.physical:
+        description: "Physical memory assigned to VM"
+        unit: "MBy"
+        gauge: {}
+      vm.memory.current_pressure:
+        description: "Current memory pressure"
+        unit: "%"
+        gauge: {}
+      vm.net.bytes_total:
+        description: "VM vNIC total bytes per second"
+        unit: "By/s"
+        gauge: {}
+      vm.storage.read_bytes:
+        description: "VM virtual disk read bytes per second"
+        unit: "By/s"
+        gauge: {}
+      vm.storage.write_bytes:
+        description: "VM virtual disk write bytes per second"
+        unit: "By/s"
+        gauge: {}
+      # KNOWN GAP: unit is documented by Microsoft as 100ns ticks, but not yet
+      # independently verified against this counter's raw output in a real
+      # environment. Do NOT enable a latency-threshold detector on this metric
+      # until the unit is confirmed (spot-check raw counter value against a
+      # known slow-disk VM). See docs/known-gaps-remediation.md, gap #5.
+      vm.storage.latency:
+        description: "VM virtual disk IO latency (UNIT UNCONFIRMED — see comment above)"
+        unit: "s"
+        gauge: {}
+    perfcounters:
+      # instance format: "VMName:Hv VP N"
+      - object: "Hyper-V Hypervisor Virtual Processor"
+        instances: ["*"]
+        counters:
+          - { name: "% Total Run Time", metric: vm.cpu.total_run_time }
+          - { name: "% Guest Run Time", metric: vm.cpu.guest_run_time }
+      # instance format: "VMName"
+      - object: "Hyper-V Dynamic Memory VM"
+        instances: ["*"]
+        counters:
+          - { name: "Physical Memory", metric: vm.memory.physical }
+          - { name: "Current Pressure", metric: vm.memory.current_pressure }
+      # instance format: "VMName_Network Adapter_{GUID}" or "Default Switch_{GUID}"
+      # KNOWN GAP: in one customer POC, only ~80% of VMs emitted any series
+      # here (244 vNIC series vs. ~308 VMs). Root cause not yet confirmed —
+      # candidates are VMs with no vNIC attached, VMs that are powered off, or
+      # a naming edge case not covered by transform/vm_name. Spot-check the
+      # missing ~20% before enabling a "no network data" detector on this
+      # metric (a naive "series went to zero" detector would false-positive
+      # on VMs that never had a vNIC). See docs/known-gaps-remediation.md, gap #7.
+      - object: "Hyper-V Virtual Network Adapter"
+        instances: ["*"]
+        counters:
+          - { name: "Bytes Total/sec", metric: vm.net.bytes_total }
+      # instance format: "C:\...\Virtual Hard Disks\VMName.vhdx" or "...{GUID}.vmgs"
+      - object: "Hyper-V Virtual Storage Device"
+        instances: ["*"]
+        counters:
+          - { name: "Read Bytes/sec", metric: vm.storage.read_bytes }
+          - { name: "Write Bytes/sec", metric: vm.storage.write_bytes }
+          - { name: "Latency", metric: vm.storage.latency }
+
+  # ---------------------------------------------------------------------------
+  # Hyper-V event logs. windowseventlogreceiver supports one channel per
+  # instance — add more `windowseventlog/<name>` blocks for additional
+  # channels (Config-Admin, Network-Admin, SynthNic-Admin, etc. — see the
+  # full 19-channel list documented in the archived Splunk Add-on for
+  # Microsoft Hyper-V, ../docs/architecture.md).
+  # ---------------------------------------------------------------------------
+  windowseventlog/hypervisor_admin:
+    channel: Microsoft-Windows-Hyper-V-Hypervisor-Admin
+  windowseventlog/hypervisor_operational:
+    channel: Microsoft-Windows-Hyper-V-Hypervisor-Operational
+  windowseventlog/vmms_admin:
+    channel: Microsoft-Windows-Hyper-V-VMMS-Admin
+  windowseventlog/worker_admin:
+    channel: Microsoft-Windows-Hyper-V-Worker-Admin
+
+processors:
+  batch:
+    timeout: 10s
+
+  # Detect this collector's own hostname (the hypervisor) for host/hypervisor pipelines
+  resourcedetection/hypervisor:
+    detectors: [env, system]
+    system:
+      hostname_sources: ["os"]
+    override: false
+
+  resource/hypervisor_tag:
+    attributes:
+      - key: host.type
+        value: "hypervisor"
+        action: upsert
+      - key: virtualization.system
+        value: "hyperv"
+        action: upsert
+
+  # Drop non-VM noise before extracting VM names from perfcounter instance strings.
+  # LIMITATION: "^Default Switch" is a prefix match on the built-in internal
+  # switch name. If a customer names a real VM "Default Switch <something>" it
+  # will be incorrectly dropped — rename that edge case or tighten the regex.
+  filter/vm_noise:
+    error_mode: ignore
+    metrics:
+      datapoint:
+        - 'IsMatch(attributes["instance"], "^Default Switch.*")'
+        - 'IsMatch(attributes["instance"], ".*\\.vmgs$")'
+        - 'IsMatch(attributes["instance"], ".*\\.iso.*")'
+
+  # Extract a clean vm.name out of noisy Windows perfcounter instance strings.
+  # Order matters — later statements only fire on more specific patterns and
+  # override the default copy from statement 1.
+  transform/vm_name:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          # 1. Default: copy the raw instance as vm.name
+          - set(attributes["vm.name"], attributes["instance"]) where attributes["instance"] != nil
+          # 2. "VMName:Hv VP N" (CPU) -> take before ":"
+          - set(attributes["vm.name"], Split(attributes["instance"], ":")[0]) where attributes["instance"] != nil and IsMatch(attributes["instance"], ".*:.*")
+          # 3. "VMName_Network Adapter_{GUID}" -> take before "_Network Adapter"
+          - set(attributes["vm.name"], Split(attributes["instance"], "_Network Adapter")[0]) where attributes["instance"] != nil and IsMatch(attributes["instance"], ".*_Network Adapter.*")
+          # 4. Storage paths: "...\Virtual Hard Disks\VMName.vhdx" -> filename after the folder
+          - set(attributes["vm.name"], Split(attributes["instance"], "Virtual Hard Disks-")[1]) where attributes["instance"] != nil and IsMatch(attributes["instance"], ".*Virtual Hard Disks-.*")
+          - set(attributes["vm.name"], Split(attributes["vm.name"], ".vhdx")[0]) where attributes["vm.name"] != nil and IsMatch(attributes["vm.name"], ".*\\.vhdx$")
+          # 5. Strip Perfmon's duplicate-instance-name suffix ("VMName#1", "VMName#2", ...).
+          #    Perfmon appends "#N" to the raw instance name whenever two+ objects on the
+          #    same host share a name (confirmed in a real POC: 62 duplicate-named VMs on
+          #    one cluster produced malformed vm.name values). This must run LAST, after
+          #    the object-specific extraction above, since the suffix can appear on any
+          #    object type's instance string. See docs/known-gaps-remediation.md, gap #6.
+          - set(attributes["vm.name"], Split(attributes["vm.name"], "#")[0]) where attributes["vm.name"] != nil and IsMatch(attributes["vm.name"], ".*#[0-9]+$")
+
+  # Promote vm.name from a datapoint attribute to a resource attribute so each
+  # VM becomes its own resource/host entity in Splunk Observability Cloud.
+  groupbyattrs/vm:
+    keys:
+      - vm.name
+
+  resource/vm_tag:
+    attributes:
+      - key: host.type
+        value: "hypervisor_managed_vm"
+        action: upsert
+      # This hypervisor's own hostname, stamped onto every VM it hosts, so the
+      # infra navigator can correlate VM -> parent host (Windows sets
+      # COMPUTERNAME automatically; no manual value needed here).
+      - key: hypervisor.host.name
+        value: "${env:COMPUTERNAME}"
+        action: upsert
+
+  # Copy vm.name -> host.name so this VM's Tier-1 (hypervisor-view) metrics
+  # land on the SAME Splunk Observability Cloud host entity as its Tier-2
+  # (in-guest) metrics from guest-vm-config.yaml — REQUIRES the Hyper-V VM
+  # name to match the guest OS hostname. See docs/architecture.md.
+  transform/vm_hostname:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["host.name"], attributes["vm.name"]) where attributes["vm.name"] != nil
+
+# Converts specific Windows Event Log occurrences into metrics so they can
+# feed a signalfx_detector, since detectors alert on metric time series, not
+# raw log events. Root-caused in a real POC: repeated live-migration failures
+# (Event ID 21026 on VMMS-Admin) were driving elevated VMMS load on specific
+# hosts. Verify the attribute key below (`winlog.event_id`) against a raw
+# ingested event for this collector version before relying on it — the
+# windowseventlogreceiver's attribute naming has changed across releases. See
+# docs/known-gaps-remediation.md, gap #9.
+connectors:
+  count/migration_failures:
+    logs:
+      hyperv.vmms.migration_failures:
+        description: "Count of Hyper-V live-migration failure events (Event ID 21026) on the VMMS-Admin channel"
+        conditions:
+          - 'attributes["winlog.event_id"] == 21026'
+
+exporters:
+  otlphttp/splunk:
+    endpoint: "https://ingest.${env:SPLUNK_REALM}.signalfx.com"
+    headers:
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
+
+service:
+  pipelines:
+    metrics/host:
+      receivers: [windowsperfcounters/host]
+      processors: [resourcedetection/hypervisor, resource/hypervisor_tag, batch]
+      exporters: [otlphttp/splunk]
+    metrics/hypervisor:
+      receivers: [windowsperfcounters/hypervisor]
+      processors: [resourcedetection/hypervisor, resource/hypervisor_tag, batch]
+      exporters: [otlphttp/splunk]
+    metrics/vm:
+      receivers: [windowsperfcounters/vm]
+      processors: [filter/vm_noise, transform/vm_name, groupbyattrs/vm, resource/vm_tag, transform/vm_hostname, batch]
+      exporters: [otlphttp/splunk]
+    metrics/migration_failures:
+      receivers: [count/migration_failures]
+      processors: [resourcedetection/hypervisor, resource/hypervisor_tag, batch]
+      exporters: [otlphttp/splunk]
+    logs/hyperv_events:
+      receivers: [windowseventlog/hypervisor_admin, windowseventlog/hypervisor_operational, windowseventlog/vmms_admin, windowseventlog/worker_admin]
+      processors: [resourcedetection/hypervisor, resource/hypervisor_tag, batch]
+      exporters: [otlphttp/splunk, count/migration_failures]

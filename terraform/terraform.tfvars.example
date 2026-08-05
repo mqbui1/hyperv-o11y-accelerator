@@ -1,0 +1,2 @@
+splunk_access_token = "REPLACE_ME"
+splunk_realm        = "us1"
